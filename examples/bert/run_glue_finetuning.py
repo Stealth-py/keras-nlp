@@ -13,7 +13,7 @@
 # limitations under the License.
 """Run finetuning on a GLUE task."""
 
-import json
+import json, csv
 
 import datasets
 import keras_tuner
@@ -60,9 +60,9 @@ flags.DEFINE_bool(
 )
 
 flags.DEFINE_bool(
-    "do_evaluation",
+    "output_tsv_file",
     True,
-    "Whether to run evaluation on the validation set for a given task.",
+    "Whether to create a tsv file for the predictions made.",
 )
 
 flags.DEFINE_integer("batch_size", 32, "The batch size.")
@@ -140,6 +140,59 @@ def load_data(task_name):
     test_ds = to_tf_dataset(data["test" + test_suffix])
     validation_ds = to_tf_dataset(data["validation" + test_suffix])
     return train_ds, test_ds, validation_ds
+
+
+def prepare_glue_submission(predictions, task_name):
+    if task_name in ("cola", "sst2", "mrpc", "qqp", "wnli"):
+        labels = ("int")
+    elif task_name == "stsb":
+        labels = ("float")
+    elif task_name in ("mnli", "mnli_matched", "mnli_mismatched", "ax"):
+        labels = ("entailment", "neutral", "contradiction")
+    elif task_name in ("qnli", "rte"):
+        labels = ("entailment", "not_entailment")
+    else:
+        raise ValueError(f"Unknown task_name {task_name}.")
+
+    task_name = task_name.upper()
+
+    if task_name=="COLA":
+        task_name = "CoLA"
+    elif task_name=="SST2":
+        task_name = "SST-2"
+    elif task_name=="STSB":
+        task_name = "STS-B"
+    elif task_name in ("MNLI", "MNLI_MATCHED"):
+        task_name = "MNLI-m"
+    elif task_name=="MNLI_MISMATCHED":
+        task_name = "MNLI-mm"
+
+    submit_predictions = {}
+    if labels == ("int"):
+        submit_predictions = [
+            [i+1, each.numpy()] for i, each in enumerate(
+                tf.argmax(predictions, axis = 1)
+            )
+        ]
+    elif labels == ("float"):
+        submit_predictions = [
+            [i+1, each.numpy()] for i, each in enumerate(predictions)
+        ]
+    else:
+        submit_predictions = [
+            [i+1, labels[each.numpy()]] for i, each in enumerate(
+                tf.argmax(predictions, axis = 1)
+            )
+        ]
+
+    print(submit_predictions)
+
+    submit_predictions.insert(0, ["index", "prediction"])
+    
+    with open(f"{task_name}.tsv", "w") as glue_submission_file:
+        glue_submission_file = csv.writer(glue_submission_file, delimiter="\t")
+        glue_submission_file.writerows(submit_predictions)
+    glue_submission_file.close()
 
 
 class BertClassificationFinetuner(keras.Model):
@@ -256,9 +309,16 @@ def main(_):
         f"The best hyperparameters found are:\nLearning Rate: {best_hp['lr']}"
     )
 
-    if FLAGS.do_evaluation:
-        print("Evaluating on test set.")
-        finetuning_model.evaluate(test_ds)
+    predictions = finetuning_model.predict(test_ds)
+
+    #TODO: evaluate if real labels, else dont evaluate
+    print("Evaluating on test set.")
+    finetuning_model.evaluate(test_ds)
+
+    # If output_tsv_file flag is set, then create a tsv file for the
+    # predictions
+    if FLAGS.output_tsv_file:
+        prepare_glue_submission(predictions, FLAGS.task_name)
 
     # TODO(mattdangerw): After incorporating keras_nlp tokenization, save an
     # end-to-end model includeing preprocessing that operates on raw strings.
